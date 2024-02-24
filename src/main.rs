@@ -1,43 +1,44 @@
-//! # Pico Blinky Example
+//! # ADC FIFO Example
 //!
-//! Blinks the LED on a Pico board.
+//! This application demonstrates how to read ADC samples in free-running mode,
+//! and reading them from the FIFO by polling the fifo's `len()`.
 //!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for
-//! the on-board LED.
+//! It may need to be adapted to your particular board layout and/or pin assignment.
 //!
 //! See the `Cargo.toml` file for Copyright and license details.
 
 #![no_std]
 #![no_main]
 
-// The macro for our start-up function
-use rp_pico::entry;
-
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
 
-// Pull in any important traits
-use rp_pico::hal::prelude::*;
+// Alias for our HAL crate
+use rp_pico::hal as hal;
 
-use embedded_hal::digital::v2::OutputPin;
+// Some traits we need
+use hal::Clock;
+
+// UART related types
+use hal::uart::{DataBits, StopBits, UartConfig};
 
 // A shorter alias for the Peripheral Access Crate, which provides low-level
 // register access
-use rp_pico::hal::pac;
+use hal::pac;
 
-// A shorter alias for the Hardware Abstraction Layer, which provides
-// higher-level drivers.
-use rp_pico::hal;
+/// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz. Adjust
+/// if your board has a different frequency
+const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
 /// Entry point to our bare-metal application.
 ///
-/// The `#[entry]` macro ensures the Cortex-M start-up code calls this function
-/// as soon as all global variables are initialised.
+/// The `#[rp2040_hal::entry]` macro ensures the Cortex-M start-up code calls this function
+/// as soon as all global variables and the spinlock are initialised.
 ///
-/// The function configures the RP2040 peripherals, then blinks the LED in an
-/// infinite loop.
-#[entry]
+/// The function configures the RP2040 peripherals, then prints the temperature
+/// in an infinite loop.
+#[hal::entry]
 fn main() -> ! {
     // Grab our singleton objects
     let mut pac = pac::Peripherals::take().unwrap();
@@ -47,19 +48,15 @@ fn main() -> ! {
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
 
     // Configure the clocks
-    //
-    // The default is to generate a 125 MHz system clock
     let clocks = hal::clocks::init_clocks_and_plls(
-        rp_pico::XOSC_CRYSTAL_FREQ,
+        XTAL_FREQ_HZ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
         pac.PLL_USB,
         &mut pac.RESETS,
         &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+    ).ok().unwrap();
 
     // The delay object lets us wait for specified amounts of time (in
     // milliseconds)
@@ -68,23 +65,77 @@ fn main() -> ! {
     // The single-cycle I/O block controls our GPIO pins
     let sio = hal::Sio::new(pac.SIO);
 
-    // Set the pins up according to their function on this particular board
-    let pins = rp_pico::Pins::new(
+    // Set the pins to their default state
+    let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
 
-    // Set the LED to be an output
-    let mut led_pin = pins.led.into_push_pull_output();
+    // UART TX (characters sent from pico) on pin 1 (GPIO0) and RX (on pin 2 (GPIO1)
+    let uart_pins = (
+        pins.gpio0.into_function::<hal::gpio::FunctionUart>(),
+        pins.gpio1.into_function::<hal::gpio::FunctionUart>(),
+    );
 
-    // Blink the LED at 1 Hz
+    // Create a UART driver
+    let mut uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
+        .enable(
+            UartConfig::new(115200.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
+
+    // Write to the UART
+    uart.write_full_blocking(b"ADC FIFO poll example\r\n");
+
+    // Enable ADC
+    let mut adc = hal::Adc::new(pac.ADC, &mut pac.RESETS);
+
+    // Configure GPIO26 as an ADC input
+    let adc_pin_1 = hal::adc::AdcPin::new(pins.gpio27.into_floating_input()).unwrap();
+
+    // Configure free-running mode:
+    let mut adc_fifo = adc
+        .build_fifo()
+        // Set clock divider to target a sample rate of 1000 samples per second (1ksps).
+        // The value was calculated by `(48MHz / 1ksps) - 1 = 47999.0`.
+        // Please check the `clock_divider` method documentation for details.
+        .clock_divider(47999, 0)
+        // sample the temperature sensor first
+        .set_channel(&adc_pin_1)
+        // Uncomment this line to produce 8-bit samples, instead of 12 bit (lower bits are discarded)
+        //.shift_8bit()
+        // start sampling
+        .start();
+
+    // intialize 16kb long buffer
+    let mut window: [u16; 16000] = [0; 16000];
+    // by default, use the whole thing
+    let mut windowlen = 16000;
+    let mut i = 0;
+
     loop {
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        // get number of unloaded samples, and load that many samples in to the rolling window
+        let sample_len= adc_fifo.len();
+        if adc_fifo.len() > 0 {
+            for n in 0..sample_len {
+                window[i] = adc_fifo.read();
+                i += 1;
+                if i > windowlen {
+                    i = 0;
+                }
+            }
+        }
+        // average window
+        let mut sum = 0;
+        for s in window {
+            sum += s
+        }
+        let average = sum / windowlen.try_into().unwrap();
+        // scale values
+        // output pwm
     }
 }
 
