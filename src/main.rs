@@ -20,9 +20,6 @@ use rp_pico::hal as hal;
 // Some traits we need
 use hal::Clock;
 
-// UART related types
-use hal::uart::{DataBits, StopBits, UartConfig};
-
 // A shorter alias for the Peripheral Access Crate, which provides low-level
 // register access
 use hal::pac;
@@ -79,22 +76,11 @@ fn main() -> ! {
         pins.gpio1.into_function::<hal::gpio::FunctionUart>(),
     );
 
-    // Create a UART driver
-    let mut uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
-        .enable(
-            UartConfig::new(115200.Hz(), DataBits::Eight, None, StopBits::One),
-            clocks.peripheral_clock.freq(),
-        )
-        .unwrap();
-
-    // Write to the UART
-    uart.write_full_blocking(b"ADC FIFO poll example\r\n");
-
     // Enable ADC
     let mut adc = hal::Adc::new(pac.ADC, &mut pac.RESETS);
 
     // Configure GPIO26 as an ADC input
-    let adc_pin_1 = hal::adc::AdcPin::new(pins.gpio27.into_floating_input()).unwrap();
+    let adc_pin_1 = hal::adc::AdcPin::new(pins.gpio27.into_floating_input());
 
     // Configure free-running mode:
     let mut adc_fifo = adc
@@ -104,7 +90,7 @@ fn main() -> ! {
         // Please check the `clock_divider` method documentation for details.
         .clock_divider(47999, 0)
         // sample the temperature sensor first
-        .set_channel(&adc_pin_1)
+        .set_channel(&mut adc_pin_1)
         // Uncomment this line to produce 8-bit samples, instead of 12 bit (lower bits are discarded)
         //.shift_8bit()
         // start sampling
@@ -133,8 +119,8 @@ fn main() -> ! {
         for s in window {
             sum += s
         }
-        let average = sum / windowlen.try_into().unwrap();
-        // scale values
+        let average: u16 = sum / u16::try_from(windowlen).ok().unwrap();
+        // scale value to pwm range
         // output pwm
     }
 }
