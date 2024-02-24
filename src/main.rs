@@ -20,6 +20,9 @@ use rp_pico::hal as hal;
 // Some traits we need
 use hal::Clock;
 
+// GPIO traits
+use embedded_hal::PwmPin;
+
 // A shorter alias for the Peripheral Access Crate, which provides low-level
 // register access
 use hal::pac;
@@ -63,24 +66,30 @@ fn main() -> ! {
     let sio = hal::Sio::new(pac.SIO);
 
     // Set the pins to their default state
-    let pins = hal::gpio::Pins::new(
+    let pins = rp_pico::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
 
-    // UART TX (characters sent from pico) on pin 1 (GPIO0) and RX (on pin 2 (GPIO1)
-    let uart_pins = (
-        pins.gpio0.into_function::<hal::gpio::FunctionUart>(),
-        pins.gpio1.into_function::<hal::gpio::FunctionUart>(),
-    );
+    // Init PWMs
+    let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+
+    // Configure PWM4
+    let pwm = &mut pwm_slices.pwm4;
+    pwm.set_ph_correct();
+    pwm.enable();
+
+    // Output channel B on PWM4 to the LED pin
+    let channel = &mut pwm.channel_b;
+    channel.output_to(pins.led);
 
     // Enable ADC
     let mut adc = hal::Adc::new(pac.ADC, &mut pac.RESETS);
 
     // Configure GPIO26 as an ADC input
-    let adc_pin_1 = hal::adc::AdcPin::new(pins.gpio27.into_floating_input());
+    let mut adc_pin_1 = hal::adc::AdcPin::new(pins.gpio27.into_floating_input());
 
     // Configure free-running mode:
     let mut adc_fifo = adc
@@ -88,7 +97,7 @@ fn main() -> ! {
         // Set clock divider to target a sample rate of 1000 samples per second (1ksps).
         // The value was calculated by `(48MHz / 1ksps) - 1 = 47999.0`.
         // Please check the `clock_divider` method documentation for details.
-        .clock_divider(47999, 0)
+        .clock_divider(4799, 0)
         // sample the temperature sensor first
         .set_channel(&mut adc_pin_1)
         // Uncomment this line to produce 8-bit samples, instead of 12 bit (lower bits are discarded)
@@ -97,9 +106,9 @@ fn main() -> ! {
         .start();
 
     // intialize 16kb long buffer
-    let mut window: [u16; 16000] = [0; 16000];
+    let mut window: [u16; 105] = [0; 105];
     // by default, use the whole thing
-    let mut windowlen = 16000;
+    let mut windowlen = 100;
     let mut i = 0;
 
     loop {
@@ -115,13 +124,15 @@ fn main() -> ! {
             }
         }
         // average window
-        let mut sum = 0;
-        for s in window {
-            sum += s
+        let mut sum: usize = 0;
+        for s in &window[0..windowlen] {
+            sum = sum + usize::from(*s);
         }
-        let average: u16 = sum / u16::try_from(windowlen).ok().unwrap();
+        let average: u16 = (sum / windowlen).try_into().unwrap();
         // scale value to pwm range
+        let duty = average * (25000/4096);
         // output pwm
+        channel.set_duty(duty);
     }
 }
 
